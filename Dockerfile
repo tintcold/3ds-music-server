@@ -1,12 +1,12 @@
 FROM python:3.11-slim
 
 # Install ffmpeg + Node.js (required for yt-dlp JavaScript challenge solver)
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
     ca-certificates && \
-    ( [ -e /usr/bin/node ] || ln -s /usr/bin/nodejs /usr/bin/node ) && \
+    ln -sf /usr/bin/nodejs /usr/bin/node || true && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
