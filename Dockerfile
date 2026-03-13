@@ -1,13 +1,15 @@
 FROM python:3.11-slim
 
-# Install ffmpeg
+# Install ffmpeg + Node.js (required for yt-dlp JavaScript challenge solver)
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg nodejs npm && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Always install the latest yt-dlp to avoid YouTube signature issues
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade yt-dlp
 
 COPY server.py .
 
