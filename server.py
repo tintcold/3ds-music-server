@@ -116,90 +116,111 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         url = f"https://www.youtube.com/watch?v={video_id}"
-        print(f"[stream] resolving URL: {url}")
+        print(f"[stream] starting: {url}")
 
-        # Step 1: use yt-dlp to extract just the direct audio URL (no download)
-        try:
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "quiet": True,
-                "no_warnings": True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                # Get the best audio format URL
-                direct_url = None
-                if "url" in info:
-                    direct_url = info["url"]
-                elif "formats" in info:
-                    for fmt in reversed(info["formats"]):
-                        if fmt.get("acodec") != "none" and fmt.get("url"):
-                            direct_url = fmt["url"]
-                            break
-
-            if not direct_url:
-                self.send_response(500)
-                self.end_headers()
-                return
-
-        except Exception as exc:
-            print(f"[stream] yt-dlp error: {exc}")
-            self.send_response(500)
-            self.end_headers()
-            return
-
-        print(f"[stream] got direct URL, starting ffmpeg")
-
-        # Step 2: ffmpeg reads directly from the CDN URL — no yt-dlp pipe needed
         script_dir = os.path.dirname(os.path.abspath(__file__))
         ffmpeg_exe = os.path.join(script_dir, "ffmpeg.exe")
         if not os.path.exists(ffmpeg_exe):
             ffmpeg_exe = "ffmpeg"
 
+        # Use yt-dlp to get direct URL first (no download, just metadata)
+        direct_url = None
+        try:
+            ydl_opts = {
+                "format": "bestaudio[ext=webm]/bestaudio/best",
+                "quiet":       True,
+                "no_warnings": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                info = ydl.sanitize_info(info)
+
+            # Walk the formats list to find a URL
+            for fmt in reversed(info.get("formats", [])):
+                if fmt.get("url") and fmt.get("acodec", "none") != "none":
+                    direct_url = fmt["url"]
+                    break
+            if not direct_url:
+                direct_url = info.get("url")
+
+        except Exception as exc:
+            print(f"[stream] yt-dlp failed: {exc}")
+
+        if not direct_url:
+            print("[stream] no direct URL found, falling back to yt-dlp pipe")
+            # Fallback: pipe yt-dlp stdout into ffmpeg stdin
+            cmd_ytdlp = [
+                sys.executable, "-m", "yt_dlp",
+                "-f", "bestaudio/best",
+                "--quiet", "--no-warnings",
+                "-o", "-",
+                url
+            ]
+            cmd_ffmpeg = [
+                ffmpeg_exe, "-y",
+                "-i", "pipe:0",
+                "-vn", "-c:a", "libvorbis",
+                "-ar", "22050", "-ac", "2", "-q:a", "2",
+                "-f", "ogg", "pipe:1"
+            ]
+            proc_ytdlp = None
+            proc_ffmpeg = None
+            try:
+                proc_ytdlp = subprocess.Popen(cmd_ytdlp, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdin=proc_ytdlp.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if proc_ytdlp.stdout:
+                    proc_ytdlp.stdout.close()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/ogg")
+                self.end_headers()
+                while True:
+                    chunk = proc_ffmpeg.stdout.read(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                print("[stream] client disconnected")
+            except Exception as exc:
+                print(f"[stream] pipe error: {exc}")
+            finally:
+                if proc_ytdlp: proc_ytdlp.terminate(); proc_ytdlp.wait()
+                if proc_ffmpeg: proc_ffmpeg.terminate(); proc_ffmpeg.wait()
+            print("[stream] done (pipe fallback)")
+            return
+
+        # Fast path: ffmpeg reads directly from CDN URL
+        print(f"[stream] got direct URL, starting ffmpeg fast path")
         cmd_ffmpeg = [
             ffmpeg_exe, "-y",
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
-            "-i", direct_url,       # read directly from YouTube CDN
-            "-vn",
-            "-c:a", "libvorbis",
-            "-ar", "22050",         # lower sample rate = less data = faster start
-            "-ac", "2",
-            "-q:a", "2",            # lower quality = smaller chunks = faster start
-            "-f", "ogg",
-            "pipe:1"
+            "-i", direct_url,
+            "-vn", "-c:a", "libvorbis",
+            "-ar", "22050", "-ac", "2", "-q:a", "2",
+            "-f", "ogg", "pipe:1"
         ]
-
         proc_ffmpeg = None
         try:
-            proc_ffmpeg = subprocess.Popen(
-                cmd_ffmpeg,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL
-            )
-
+            proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             self.send_response(200)
             self.send_header("Content-Type", "audio/ogg")
             self.end_headers()
-
-            # Stream chunks directly - no manual chunking needed (HTTP/2 handles framing)
             while True:
                 chunk = proc_ffmpeg.stdout.read(4096)
                 if not chunk:
                     break
                 self.wfile.write(chunk)
                 self.wfile.flush()
-
         except (BrokenPipeError, ConnectionResetError):
             print("[stream] client disconnected early")
         except Exception as exc:
-            print(f"[stream] error: {exc}")
+            print(f"[stream] ffmpeg error: {exc}")
         finally:
             if proc_ffmpeg:
                 proc_ffmpeg.terminate()
                 proc_ffmpeg.wait()
-
         print("[stream] done")
 
 
