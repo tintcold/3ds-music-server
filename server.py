@@ -149,7 +149,7 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
         direct_url = None
         try:
             ydl_opts = {
-                "format": "bestaudio[ext=webm]/bestaudio/best",
+                "format": "bestaudio/best",
                 "quiet":       True,
                 "no_warnings": True,
             }
