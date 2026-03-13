@@ -37,13 +37,14 @@ COOKIES_FILE = None
 _cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
 if _cookies_b64:
     try:
+        _data = base64.b64decode(_cookies_b64)
         _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
-        _tmp.write(base64.b64decode(_cookies_b64))
+        _tmp.write(_data)
         _tmp.close()
         COOKIES_FILE = _tmp.name
-        print(f"[auth] Loaded YouTube cookies from environment variable")
+        print(f"[auth] Successfully loaded {len(_data)} bytes of cookies from env")
     except Exception as e:
-        print(f"[auth] Failed to load cookies: {e}")
+        print(f"[auth] ERROR decoding YOUTUBE_COOKIES_B64: {e}")
 elif os.path.exists("cookies.txt"):  # fallback for local dev
     COOKIES_FILE = "cookies.txt"
     print(f"[auth] Using local cookies.txt")
@@ -168,7 +169,9 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                             break
 
         except Exception as exc:
-            print(f"[stream] yt-dlp failed: {exc}")
+            print(f"[stream] yt-dlp direct URL extraction failed: {exc}")
+            # If the specific "format not available" error happens here, the fallback might still fail.
+            # But we try anyway.
 
         if not direct_url:
             print("[stream] no direct URL found, falling back to yt-dlp pipe")
@@ -177,9 +180,13 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 sys.executable, "-m", "yt_dlp",
                 "-f", "bestaudio/best",
                 "--quiet", "--no-warnings",
+                "--no-check-certificates",
                 "-o", "-",
                 url
             ]
+            if COOKIES_FILE:
+                cmd_ytdlp.insert(3, "--cookiefile")
+                cmd_ytdlp.insert(4, COOKIES_FILE)
             cmd_ffmpeg = [
                 ffmpeg_exe, "-y",
                 "-i", "pipe:0",
@@ -258,12 +265,21 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
 
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    ip = get_local_ip()
+    # Log environment info for debugging
     print("=" * 44)
     print("  3DS Music Proxy Server")
+    try:
+        import yt_dlp
+        print(f"  yt-dlp version: {yt_dlp.version.__version__}")
+    except Exception:
+        print("  yt-dlp version: unknown")
+    
+    node_ver = subprocess.getoutput("node --version")
+    print(f"  Node.js version: {node_ver}")
+    
+    ip = get_local_ip()
     print(f"  Your PC IP : {ip}")
     print(f"  Port       : {PORT}")
-    print(f"  Set SERVER_IP in main.c to: {ip}")
     print("=" * 44)
 
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), MusicProxyHandler)
