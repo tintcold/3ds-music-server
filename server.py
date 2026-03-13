@@ -20,6 +20,8 @@ import socket
 import sys
 import os
 import threading
+import tempfile
+import base64
 
 try:
     import yt_dlp
@@ -29,6 +31,24 @@ except ImportError:
 
 # Allow cloud platforms to inject the port
 PORT = int(os.environ.get("PORT", 8899))
+
+# Write cookies from env var to a temp file (safe — never stored in repo)
+COOKIES_FILE = None
+_cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+if _cookies_b64:
+    try:
+        _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
+        _tmp.write(base64.b64decode(_cookies_b64))
+        _tmp.close()
+        COOKIES_FILE = _tmp.name
+        print(f"[auth] Loaded YouTube cookies from environment variable")
+    except Exception as e:
+        print(f"[auth] Failed to load cookies: {e}")
+elif os.path.exists("cookies.txt"):  # fallback for local dev
+    COOKIES_FILE = "cookies.txt"
+    print(f"[auth] Using local cookies.txt")
+else:
+    print("[auth] WARNING: No YouTube cookies found. Streams may fail on cloud.")
 
 
 def get_local_ip():
@@ -70,10 +90,12 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             "format": "bestaudio",
             "quiet": True,
             "no_warnings": True,
-            "extract_flat": True,       # don't fully resolve each video
+            "extract_flat": True,
             "default_search": "ytsearch10",
             "ignoreerrors": True,
         }
+        if COOKIES_FILE:
+            ydl_opts["cookiefile"] = COOKIES_FILE
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -131,6 +153,8 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 "quiet":       True,
                 "no_warnings": True,
             }
+            if COOKIES_FILE:
+                ydl_opts["cookiefile"] = COOKIES_FILE
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 info = ydl.sanitize_info(info)
