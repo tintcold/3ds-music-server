@@ -157,15 +157,15 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 ydl_opts["cookiefile"] = COOKIES_FILE
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                info = ydl.sanitize_info(info)
-
-            # Walk the formats list to find a URL
-            for fmt in reversed(info.get("formats", [])):
-                if fmt.get("url") and fmt.get("acodec", "none") != "none":
-                    direct_url = fmt["url"]
-                    break
-            if not direct_url:
+                # Do NOT call sanitize_info — it strips the CDN URLs!
+                # Try top-level url first (already-selected format)
                 direct_url = info.get("url")
+                # Walk formats if not found at top level
+                if not direct_url:
+                    for fmt in reversed(info.get("formats", [])):
+                        if fmt.get("url") and fmt.get("acodec", "none") != "none":
+                            direct_url = fmt["url"]
+                            break
 
         except Exception as exc:
             print(f"[stream] yt-dlp failed: {exc}")
