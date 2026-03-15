@@ -32,6 +32,19 @@ except ImportError:
 # Allow cloud platforms to inject the port
 PORT = int(os.environ.get("PORT", 8899))
 
+# Detect node.js path for yt-dlp JS runtime (required since yt-dlp v2025)
+_node_path = os.environ.get("NODE_PATH", "")
+if not _node_path:
+    import shutil
+    _node_path = shutil.which("node") or shutil.which("nodejs") or ""
+if _node_path:
+    # Format: 'node:/path/to/node' or just 'node' if on PATH
+    JS_RUNTIME_ARG = f"node:{_node_path}"
+    print(f"[js] Using node.js runtime: {_node_path}")
+else:
+    JS_RUNTIME_ARG = "node"  # hope it's on PATH
+    print("[js] WARNING: node.js not found on PATH. YouTube may fail.")
+
 # Write cookies from env var to a temp file (safe — never stored in repo)
 COOKIES_FILE = None
 _cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
@@ -159,6 +172,9 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 "format": FORMAT_SELECTOR,
                 "quiet":       True,
                 "no_warnings": True,
+                # yt-dlp now requires a JS runtime to resolve YouTube formats.
+                # Without this you get "Requested format is not available".
+                "extractor_args": {"youtube": {"js_runtimes": [JS_RUNTIME_ARG]}},
                 # Spoof a real browser to avoid bot detection on cloud IPs
                 "http_headers": {
                     "User-Agent": (
@@ -202,6 +218,7 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 "-f", FORMAT_SELECTOR,
                 "--quiet", "--no-warnings",
                 "--no-check-certificates",
+                "--extractor-args", f"youtube:js_runtimes={JS_RUNTIME_ARG}",
                 "--user-agent", (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
