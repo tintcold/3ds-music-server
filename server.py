@@ -32,38 +32,6 @@ except ImportError:
 # Allow cloud platforms to inject the port
 PORT = int(os.environ.get("PORT", 8899))
 
-# Detect node.js path for yt-dlp JS runtime (required since yt-dlp v2025)
-_node_path = os.environ.get("NODE_PATH", "")
-if not _node_path:
-    import shutil
-    _node_path = shutil.which("node") or shutil.which("nodejs") or ""
-if _node_path:
-    # Format: 'node:/path/to/node' or just 'node' if on PATH
-    JS_RUNTIME_ARG = f"node:{_node_path}"
-    print(f"[js] Using node.js runtime: {_node_path}")
-else:
-    JS_RUNTIME_ARG = "node"  # hope it's on PATH
-    print("[js] WARNING: node.js not found on PATH. YouTube may fail.")
-
-# Write cookies from env var to a temp file (safe — never stored in repo)
-COOKIES_FILE = None
-_cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
-if _cookies_b64:
-    try:
-        _data = base64.b64decode(_cookies_b64)
-        _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
-        _tmp.write(_data)
-        _tmp.close()
-        COOKIES_FILE = _tmp.name
-        print(f"[auth] Successfully loaded {len(_data)} bytes of cookies from env")
-    except Exception as e:
-        print(f"[auth] ERROR decoding YOUTUBE_COOKIES_B64: {e}")
-elif os.path.exists("cookies.txt"):  # fallback for local dev
-    COOKIES_FILE = "cookies.txt"
-    print(f"[auth] Using local cookies.txt")
-else:
-    print("[auth] WARNING: No YouTube cookies found. Streams may fail on cloud.")
-
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -108,8 +76,6 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             "default_search": "ytsearch10",
             "ignoreerrors": True,
         }
-        if COOKIES_FILE:
-            ydl_opts["cookiefile"] = COOKIES_FILE
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -159,23 +125,31 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
         if not os.path.exists(ffmpeg_exe):
             ffmpeg_exe = "ffmpeg"
 
-        # Use yt-dlp to get direct URL first (no download, just metadata)
-        # Use a broad format selector so we never hit "format not available"
+        # --------------- format selection ---------------------------------- #
+        # Prefer format 18: a single progressive MP4 (video+audio, non-DASH).
+        # Non-DASH streams let ffmpeg start output almost immediately.
+        # DASH (bestaudio webm/m4a) requires manifest + segment fetching which
+        # causes a multi-second delay before the 3DS receives any audio data.
         FORMAT_SELECTOR = (
-            "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=mp3]"
-            "/bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "18"                          # mp4 360p progressive (fast start, non-DASH)
+            "/bestaudio[ext=m4a]"         # m4a DASH fallback
+            "/bestaudio[ext=webm]"        # webm/opus DASH fallback
+            "/bestaudio"
             "/best[ext=mp4]/best"
         )
+        # ffmpeg flags that cut startup latency from ~5s to <0.5s
+        FFMPEG_LOW_LATENCY = [
+            "-probesize",       "50000",   # analyse only 50 KB (default is 5 MB)
+            "-analyzeduration", "1000000", # 1 s max   (default is 5 s)
+            "-fflags",          "nobuffer",
+        ]
+
         direct_url = None
         try:
             ydl_opts = {
-                "format": FORMAT_SELECTOR,
+                "format":      FORMAT_SELECTOR,
                 "quiet":       True,
                 "no_warnings": True,
-                # js_runtimes must be a TOP-LEVEL key (not inside extractor_args).
-                # yt-dlp v2025+ requires an external JS engine to resolve YouTube formats.
-                "js_runtimes": [JS_RUNTIME_ARG],
-                # Spoof a real browser to avoid bot detection on cloud IPs
                 "http_headers": {
                     "User-Agent": (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -184,54 +158,44 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                     )
                 },
             }
-            if COOKIES_FILE:
-                ydl_opts["cookiefile"] = COOKIES_FILE
+
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                # Do NOT call sanitize_info — it strips the CDN URLs!
-                # Try top-level url first (already-selected format)
                 direct_url = info.get("url")
-                # Walk formats if not found at top level
                 if not direct_url:
                     for fmt in reversed(info.get("formats", [])):
                         u = fmt.get("url")
                         if u and fmt.get("acodec", "none") != "none":
                             direct_url = u
                             break
-                    # Last resort: grab ANY format that has a url
-                    if not direct_url:
-                        for fmt in reversed(info.get("formats", [])):
-                            if fmt.get("url"):
-                                direct_url = fmt["url"]
-                                break
+                if not direct_url:
+                    for fmt in reversed(info.get("formats", [])):
+                        if fmt.get("url"):
+                            direct_url = fmt["url"]
+                            break
+                if direct_url:
+                    print(f"[stream] got direct URL (format {info.get('format_id','?')})")
 
         except Exception as exc:
-            print(f"[stream] yt-dlp direct URL extraction failed: {exc}")
-            # If the specific "format not available" error happens here, the fallback might still fail.
-            # But we try anyway.
+            print(f"[stream] yt-dlp extraction failed: {exc}")
 
         if not direct_url:
-            print("[stream] no direct URL found, falling back to yt-dlp pipe")
-            # Fallback: pipe yt-dlp stdout into ffmpeg stdin
+            print("[stream] no direct URL — falling back to yt-dlp pipe")
             cmd_ytdlp = [
                 sys.executable, "-m", "yt_dlp",
                 "-f", FORMAT_SELECTOR,
                 "--quiet", "--no-warnings",
                 "--no-check-certificates",
-                "--extractor-args", f"youtube:js_runtimes={JS_RUNTIME_ARG}",
                 "--user-agent", (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
-                "-o", "-",
-                url
             ]
-            if COOKIES_FILE:
-                cmd_ytdlp.insert(3, "--cookiefile")
-                cmd_ytdlp.insert(4, COOKIES_FILE)
+            cmd_ytdlp.extend(["-o", "-", url])
             cmd_ffmpeg = [
                 ffmpeg_exe, "-y",
+                *FFMPEG_LOW_LATENCY,
                 "-i", "pipe:0",
                 "-vn", "-c:a", "libvorbis",
                 "-ar", "22050", "-ac", "2", "-q:a", "2",
@@ -240,8 +204,9 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             proc_ytdlp = None
             proc_ffmpeg = None
             try:
-                proc_ytdlp = subprocess.Popen(cmd_ytdlp, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdin=proc_ytdlp.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                proc_ytdlp = subprocess.Popen(cmd_ytdlp, stdout=subprocess.PIPE, stderr=None)
+                proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdin=proc_ytdlp.stdout,
+                                               stdout=subprocess.PIPE, stderr=None)
                 if proc_ytdlp.stdout:
                     proc_ytdlp.stdout.close()
                 self.send_response(200)
@@ -258,7 +223,7 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception as exc:
                 print(f"[stream] pipe error: {exc}")
             finally:
-                if proc_ytdlp: proc_ytdlp.terminate(); proc_ytdlp.wait()
+                if proc_ytdlp:  proc_ytdlp.terminate();  proc_ytdlp.wait()
                 if proc_ffmpeg: proc_ffmpeg.terminate(); proc_ffmpeg.wait()
             print("[stream] done (pipe fallback)")
             return
@@ -267,6 +232,8 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
         print(f"[stream] got direct URL, starting ffmpeg fast path")
         cmd_ffmpeg = [
             ffmpeg_exe, "-y",
+            *FFMPEG_LOW_LATENCY,
+            # -reconnect flags MUST come before -i
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
@@ -277,7 +244,8 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
         ]
         proc_ffmpeg = None
         try:
-            proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            proc_ffmpeg = subprocess.Popen(cmd_ffmpeg, stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL)
             self.send_response(200)
             self.send_header("Content-Type", "audio/ogg")
             self.end_headers()
