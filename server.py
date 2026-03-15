@@ -147,12 +147,26 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             ffmpeg_exe = "ffmpeg"
 
         # Use yt-dlp to get direct URL first (no download, just metadata)
+        # Use a broad format selector so we never hit "format not available"
+        FORMAT_SELECTOR = (
+            "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[ext=mp3]"
+            "/bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/best[ext=mp4]/best"
+        )
         direct_url = None
         try:
             ydl_opts = {
-                "format": "bestaudio/best",
+                "format": FORMAT_SELECTOR,
                 "quiet":       True,
                 "no_warnings": True,
+                # Spoof a real browser to avoid bot detection on cloud IPs
+                "http_headers": {
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    )
+                },
             }
             if COOKIES_FILE:
                 ydl_opts["cookiefile"] = COOKIES_FILE
@@ -164,9 +178,16 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 # Walk formats if not found at top level
                 if not direct_url:
                     for fmt in reversed(info.get("formats", [])):
-                        if fmt.get("url") and fmt.get("acodec", "none") != "none":
-                            direct_url = fmt["url"]
+                        u = fmt.get("url")
+                        if u and fmt.get("acodec", "none") != "none":
+                            direct_url = u
                             break
+                    # Last resort: grab ANY format that has a url
+                    if not direct_url:
+                        for fmt in reversed(info.get("formats", [])):
+                            if fmt.get("url"):
+                                direct_url = fmt["url"]
+                                break
 
         except Exception as exc:
             print(f"[stream] yt-dlp direct URL extraction failed: {exc}")
@@ -178,9 +199,14 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             # Fallback: pipe yt-dlp stdout into ffmpeg stdin
             cmd_ytdlp = [
                 sys.executable, "-m", "yt_dlp",
-                "-f", "bestaudio/best",
+                "-f", FORMAT_SELECTOR,
                 "--quiet", "--no-warnings",
                 "--no-check-certificates",
+                "--user-agent", (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
                 "-o", "-",
                 url
             ]
