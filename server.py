@@ -29,8 +29,39 @@ except ImportError:
     print("ERROR: yt-dlp not installed. Run: pip install yt-dlp")
     sys.exit(1)
 
-# Allow cloud platforms to inject the port
 PORT = int(os.environ.get("PORT", 8899))
+
+# Detect node.js path for yt-dlp JS runtime (required since yt-dlp v2025)
+import shutil as _shutil
+_node_path = os.environ.get("NODE_PATH", "") or _shutil.which("node") or _shutil.which("nodejs") or ""
+if _node_path:
+    JS_RUNTIMES = {"node": {"path": _node_path}}
+    print(f"[js] Using node.js runtime: {_node_path}")
+else:
+    JS_RUNTIMES = {"node": {}}  # hope it's on PATH
+    print("[js] WARNING: node.js not found on PATH. YouTube may fail.")
+_node_path = _node_path  # keep for CLI --js-runtimes arg
+JS_RUNTIME_CLI = f"node:{_node_path}" if _node_path else "node"
+
+# Write cookies from env var to a temp file (safe — never stored in repo)
+import base64, tempfile
+COOKIES_FILE = None
+_cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+if _cookies_b64:
+    try:
+        _data = base64.b64decode(_cookies_b64)
+        _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
+        _tmp.write(_data)
+        _tmp.close()
+        COOKIES_FILE = _tmp.name
+        print(f"[auth] Successfully loaded {len(_data)} bytes of cookies from env")
+    except Exception as e:
+        print(f"[auth] ERROR decoding YOUTUBE_COOKIES_B64: {e}")
+elif os.path.exists("cookies.txt"):  # fallback for local dev
+    COOKIES_FILE = "cookies.txt"
+    print(f"[auth] Using local cookies.txt")
+else:
+    print("[auth] WARNING: No YouTube cookies found. Streams may fail on cloud.")
 
 
 def get_local_ip():
@@ -76,6 +107,8 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
             "default_search": "ytsearch10",
             "ignoreerrors": True,
         }
+        if COOKIES_FILE:
+            ydl_opts["cookiefile"] = COOKIES_FILE
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -157,7 +190,11 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                         "Chrome/124.0.0.0 Safari/537.36"
                     )
                 },
+                "js_runtimes": JS_RUNTIMES,
+                "remote_components": "ejs",
             }
+            if COOKIES_FILE:
+                ydl_opts["cookiefile"] = COOKIES_FILE
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -192,7 +229,13 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
             ]
-            cmd_ytdlp.extend(["-o", "-", url])
+            if COOKIES_FILE:
+                cmd_ytdlp.extend(["--cookies", COOKIES_FILE])
+            cmd_ytdlp.extend([
+                "--js-runtimes", JS_RUNTIME_CLI,
+                "--remote-components", "ejs:github",
+                "-o", "-", url
+            ])
             cmd_ffmpeg = [
                 ffmpeg_exe, "-y",
                 *FFMPEG_LOW_LATENCY,
