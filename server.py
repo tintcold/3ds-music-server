@@ -172,9 +172,9 @@ class MusicProxyHandler(http.server.BaseHTTPRequestHandler):
                 "format": FORMAT_SELECTOR,
                 "quiet":       True,
                 "no_warnings": True,
-                # yt-dlp now requires a JS runtime to resolve YouTube formats.
-                # Without this you get "Requested format is not available".
-                "extractor_args": {"youtube": {"js_runtimes": [JS_RUNTIME_ARG]}},
+                # js_runtimes must be a TOP-LEVEL key (not inside extractor_args).
+                # yt-dlp v2025+ requires an external JS engine to resolve YouTube formats.
+                "js_runtimes": [JS_RUNTIME_ARG],
                 # Spoof a real browser to avoid bot detection on cloud IPs
                 "http_headers": {
                     "User-Agent": (
